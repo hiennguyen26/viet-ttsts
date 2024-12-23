@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Voice Chat Interface</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .chat-container {
+            background-color: white;
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+            height: 400px;
+            overflow-y: auto;
+        }
+        .message {
+            margin: 10px 0;
+            padding: 10px;
+            border-radius: 5px;
+        }
+        .user-message {
+            background-color: #e3f2fd;
+            margin-left: 20%;
+        }
+        .bot-message {
+            background-color: #f5f5f5;
+            margin-right: 20%;
+        }
+        .status {
+            text-align: center;
+            margin: 20px 0;
+            font-weight: bold;
+            color: #666;
+        }
+        .recording-indicator {
+            display: none;
+            color: red;
+            text-align: center;
+            margin-top: 10px;
+        }
+        .instructions {
+            text-align: center;
+            color: #666;
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="instructions">
+        Hold SPACE to record, release to process
+    </div>
+    <div class="chat-container" id="chatContainer"></div>
+    <div class="status" id="status">Ready to record</div>
+    <div class="recording-indicator" id="recordingIndicator">Recording...</div>
+
+    <script>
+        let isRecording = false;
+        let mediaRecorder = null;
+        let audioChunks = [];
+        let isProcessing = false;
+
+        async function initializeRecording() {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            mediaRecorder = new MediaRecorder(stream);
+            
+            mediaRecorder.ondataavailable = (event) => {
+                audioChunks.push(event.data);
+            };
+
+            mediaRecorder.onstop = async () => {
+                const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+                await processAudio(audioBlob);
+            };
+        }
+
+        async function processAudio(audioBlob) {
+            isProcessing = true;
+            document.getElementById('status').textContent = 'Processing...';
+            
+            // Convert blob to base64
+            const reader = new FileReader();
+            reader.readAsDataURL(audioBlob);
+            reader.onloadend = async () => {
+                const base64Audio = reader.result;
+                
+                try {
+                    const response = await fetch('/process_audio', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({ audio: base64Audio }),
+                    });
+                    
+                    const data = await response.json();
+                    if (response.ok) {
+                        addMessage(data.transcribed_text, 'user');
+                        addMessage(data.response, 'bot');
+                    } else {
+                        addMessage('Error: ' + data.error, 'bot');
+                    }
+                } catch (error) {
+                    addMessage('Error processing audio: ' + error.message, 'bot');
+                }
+                
+                isProcessing = false;
+                document.getElementById('status').textContent = 'Ready to record';
+            };
+        }
+
+        function addMessage(text, sender) {
+            const chatContainer = document.getElementById('chatContainer');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${sender}-message`;
+            messageDiv.textContent = text;
+            chatContainer.appendChild(messageDiv);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+
+        document.addEventListener('DOMContentLoaded', async () => {
+            await initializeRecording();
+            
+            document.addEventListener('keydown', (e) => {
+                if (e.code === 'Space' && !e.repeat && !isRecording && !isProcessing) {
+                    e.preventDefault();
+                    isRecording = true;
+                    audioChunks = [];
+                    mediaRecorder.start();
+                    document.getElementById('status').textContent = 'Recording...';
+                    document.getElementById('recordingIndicator').style.display = 'block';
+                }
+            });
+
+            document.addEventListener('keyup', (e) => {
+                if (e.code === 'Space' && isRecording) {
+                    e.preventDefault();
+                    isRecording = false;
+                    mediaRecorder.stop();
+                    document.getElementById('recordingIndicator').style.display = 'none';
+                }
+            });
+        });
+    </script>
+</body>
+</html> 
