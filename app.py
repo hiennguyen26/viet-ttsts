@@ -1,87 +1,75 @@
-from flask import Flask, render_template, request, jsonify
-from elevenlabs import play
-from elevenlabs.client import ElevenLabs
-from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq
-from dotenv import load_dotenv
-import soundfile as sf
-import numpy as np
-import wave
-import tempfile
-import openai
+from flask import Flask, render_template, jsonify, send_file, send_from_directory
+from flask_pipeline import AudioProcessor
+import threading
 import os
-import base64
-import io
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+app.config['STATIC_FOLDER'] = 'static'
 
-# Load environment variables
-load_dotenv()
-elevenlabs_api = os.getenv('elevenlabs')
-openai.api_key = os.getenv('open_ai')
+# Ensure static folder exists
+os.makedirs('static', exist_ok=True)
 
-# Initialize models
-processor = AutoProcessor.from_pretrained("vinai/PhoWhisper-small")
-model = AutoModelForSpeechSeq2Seq.from_pretrained("vinai/PhoWhisper-small")
-elevenlabs_client = ElevenLabs(api_key=elevenlabs_api)
+# Global variables
+audio_processor = None
 
-def process_with_openai(text):
-    response = openai.ChatCompletion.create(
-        model="gpt-3.5-turbo",
-        messages=[
-            {"role": "system", "content": "Bạn là một người giúp đỡ rất chu đáo, hãy trả lời các câu hỏi bằng tiếng Việt"},
-            {"role": "user", "content": text}
-        ]
-    )
-    return response.choices[0].message.content
+def init_audio_processor():
+    global audio_processor
+    if audio_processor is None:
+        logger.info("Initializing AudioProcessor...")
+        audio_processor = AudioProcessor()
+        logger.info("AudioProcessor initialized")
 
 @app.route('/')
-def index():
+def home():
+    logger.info("Serving home page")
+    init_audio_processor()
     return render_template('index.html')
 
-@app.route('/process_audio', methods=['POST'])
-def process_audio():
-    try:
-        # Get audio data from the request
-        audio_data = request.json['audio']
-        audio_binary = base64.b64decode(audio_data.split(',')[1])
-        
-        # Save to temporary WAV file
-        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
-            temp_file.write(audio_binary)
-            temp_file_path = temp_file.name
+@app.route('/start_recording', methods=['POST'])
+def start_recording():
+    global audio_processor
+    logger.info("Start recording request received")
+    init_audio_processor()
+    
+    if audio_processor:
+        try:
+            audio_processor.start_recording()
+            logger.info("Recording started successfully")
+            return jsonify({"status": "started"})
+        except Exception as e:
+            logger.error(f"Error starting recording: {str(e)}", exc_info=True)
+            return jsonify({"status": "error", "message": str(e)})
+    return jsonify({"status": "error", "message": "Audio processor not initialized"})
 
-        # Process audio with Whisper
-        audio_input, sampling_rate = sf.read(temp_file_path)
-        input_features = processor(
-            audio_input,
-            sampling_rate=sampling_rate,
-            return_tensors="pt"
-        ).input_features
-        
-        predicted_ids = model.generate(input_features)
-        transcribed_text = processor.batch_decode(predicted_ids, skip_special_tokens=True)[0]
-        
-        # Process with OpenAI
-        vietnamese_response = process_with_openai(transcribed_text)
-        
-        # Generate speech with ElevenLabs
-        audio = elevenlabs_client.generate(
-            text=vietnamese_response,
-            voice="Nicole",
-            model="eleven_multilingual_v2"
-        )
-        play(audio)
-        
-        # Clean up
-        os.unlink(temp_file_path)
-        
-        return jsonify({
-            'transcribed_text': transcribed_text,
-            'response': vietnamese_response,
-        })
-        
+@app.route('/stop_recording', methods=['POST'])
+def stop_recording():
+    global audio_processor
+    logger.info("Stop recording request received")
+    
+    if audio_processor:
+        try:
+            result = audio_processor.stop_recording()
+            logger.info(f"Recording stopped. Result: {result}")
+            return jsonify(result)
+        except Exception as e:
+            logger.error(f"Error stopping recording: {str(e)}", exc_info=True)
+            return jsonify({"status": "error", "message": str(e)})
+    return jsonify({"status": "error", "message": "Audio processor not initialized"})
+
+@app.route('/audio/<path:filename>')
+def serve_audio(filename):
+    logger.info(f"Serving audio file: {filename}")
+    try:
+        return send_from_directory('static', filename, mimetype='audio/mpeg')
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Error serving audio file: {e}")
+        return jsonify({"error": "Audio file not found"}), 404
 
 if __name__ == '__main__':
+    logger.info("Starting Flask application...")
     app.run(debug=True) 
