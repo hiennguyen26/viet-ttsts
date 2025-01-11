@@ -86,6 +86,81 @@
             opacity: 0.6;
             cursor: not-allowed;
         }
+
+        #chat-container {
+            width: 100%;
+            margin-top: 20px;
+            max-height: 500px;
+            overflow-y: auto;
+            background: white;
+            border-radius: 5px;
+            padding: 20px;
+        }
+
+        .chat-entry {
+            margin-bottom: 20px;
+            padding-bottom: 20px;
+            border-bottom: 1px solid #eee;
+        }
+
+        .user-message {
+            background: #f0f8ff;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 10px;
+        }
+
+        .ai-response {
+            background: #f5f5f5;
+            padding: 15px;
+            border-radius: 10px;
+        }
+
+        .timestamp {
+            color: #666;
+            font-size: 12px;
+            display: block;
+            margin-bottom: 5px;
+        }
+
+        .reset-button {
+            background-color: #dc3545;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            font-size: 16px;
+            border-radius: 5px;
+            cursor: pointer;
+            margin-top: 20px;
+        }
+
+        .reset-button:hover {
+            background-color: #c82333;
+        }
+
+        .response-audio {
+            width: 100%;
+            margin-top: 10px;
+        }
+
+        /* Add loading spinner styles */
+        .loading {
+            opacity: 0.6;
+            cursor: not-allowed !important;
+        }
+        
+        .loading::after {
+            content: "...";
+            display: inline-block;
+            animation: dots 1s steps(5, end) infinite;
+        }
+        
+        @keyframes dots {
+            0%, 20% { content: ""; }
+            40% { content: "."; }
+            60% { content: ".."; }
+            80%, 100% { content: "..."; }
+        }
     </style>
 </head>
 <body>
@@ -101,6 +176,7 @@
         </div>
 
         <button id="recordButton" class="record-button">Bắt đầu ghi âm</button>
+        <button id="resetChat" class="reset-button">Xóa lịch sử chat</button>
 
         <div class="instructions">
             <h3>Cách sử dụng:</h3>
@@ -113,105 +189,177 @@
             </ol>
         </div>
 
-        <div id="status" class="status" style="margin-top: 20px; display: none;">
-            <p id="transcription"></p>
-            <p id="response"></p>
-            <audio id="responseAudio" controls autoplay style="display: none;"></audio>
-            <p id="audioStatus" style="color: #666; font-size: 14px;"></p>
+        <div id="chat-container">
+            <div id="chat-history">
+                <!-- Chat entries will be added here dynamically -->
+            </div>
+            <div id="current-interaction" style="display: none;">
+                <!-- Current recording status -->
+            </div>
         </div>
     </div>
 
     <script>
+        let mediaRecorder;
+        let audioChunks = [];
         let isRecording = false;
+        let isProcessing = false;
 
-        $('#recordButton').click(function() {
-            isRecording = !isRecording;
-            const $status = $('#status');
-            const $button = $(this);
-            
-            if (isRecording) {
-                $button.text('Stop Recording');
-                $button.addClass('recording');
-                $status.hide();
+        function formatTimestamp() {
+            const now = new Date();
+            return now.toLocaleTimeString('vi-VN', { 
+                hour: '2-digit', 
+                minute: '2-digit',
+                second: '2-digit' 
+            });
+        }
+
+        function createChatEntry(transcribedText, responseText, audioUrl) {
+            const timestamp = formatTimestamp();
+            const entry = $(`
+                <div class="chat-entry">
+                    <div class="user-message">
+                        <span class="timestamp">${timestamp}</span>
+                        <p><strong>Bạn nói:</strong> ${transcribedText}</p>
+                    </div>
+                    <div class="ai-response">
+                        <span class="timestamp">${timestamp}</span>
+                        <p><strong>Trả lời:</strong> ${responseText}</p>
+                        <audio class="response-audio" controls src="${audioUrl}"></audio>
+                    </div>
+                </div>
+            `);
+            return entry;
+        }
+
+        async function setupRecording() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
                 
-                $.ajax({
-                    url: '/start_recording',
-                    method: 'POST',
-                    success: function(response) {
-                        console.log('Recording started:', response);
-                    },
-                    error: function(error) {
-                        console.error('Error:', error);
-                        isRecording = false;
-                        $button.text('Start Recording').removeClass('recording');
-                    }
+                // Check for WebM support
+                const mimeType = 'audio/webm;codecs=opus';
+                if (!MediaRecorder.isTypeSupported(mimeType)) {
+                    throw new Error('WebM audio recording not supported in this browser');
+                }
+                
+                mediaRecorder = new MediaRecorder(stream, {
+                    mimeType: mimeType,
+                    audioBitsPerSecond: 128000
                 });
-            } else {
-                $button.text('Start Recording');
-                $button.removeClass('recording');
-                $button.prop('disabled', true);  // Disable button during processing
-                
+
+                mediaRecorder.ondataavailable = (event) => {
+                    if (event.data.size > 0) {
+                        audioChunks.push(event.data);
+                    }
+                };
+
+                mediaRecorder.onstop = async () => {
+                    const audioBlob = new Blob(audioChunks, { type: mimeType });
+                    const formData = new FormData();
+                    formData.append('audio', audioBlob, 'recording.webm');
+
+                    try {
+                        const $button = $('#recordButton');
+                        isProcessing = true;
+                        $button.prop('disabled', true)
+                               .addClass('loading')
+                               .text('Đang xử lý');
+
+                        const response = await fetch('/process_audio', {
+                            method: 'POST',
+                            body: formData
+                        });
+
+                        const result = await response.json();
+                        
+                        if (result.error) {
+                            alert('Lỗi xử lý: ' + result.error);
+                            return;
+                        }
+                        
+                        if (result.transcribed_text) {
+                            const audioUrl = `/audio/response.mp3?t=${new Date().getTime()}`;
+                            const chatEntry = createChatEntry(
+                                result.transcribed_text,
+                                result.response_text,
+                                audioUrl
+                            );
+                            
+                            $('#chat-history').append(chatEntry);
+                            
+                            const container = $('#chat-container');
+                            container.scrollTop(container.prop('scrollHeight'));
+                            
+                            const audio = chatEntry.find('audio').get(0);
+                            const playPromise = audio.play();
+                            
+                            if (playPromise !== undefined) {
+                                playPromise.catch(error => {
+                                    console.error('Autoplay prevented:', error);
+                                });
+                            }
+                        }
+                    } catch (error) {
+                        console.error('Error processing audio:', error);
+                        alert('Lỗi khi xử lý âm thanh: ' + error.message);
+                    } finally {
+                        isProcessing = false;
+                        isRecording = false;
+                        const $button = $('#recordButton');
+                        $button.prop('disabled', false)
+                               .removeClass('loading')
+                               .removeClass('recording')
+                               .text('Bắt đầu ghi âm');
+                        audioChunks = [];
+                    }
+                };
+            } catch (error) {
+                console.error('Error accessing microphone:', error);
+                alert('Lỗi truy cập microphone. Vui lòng đảm bảo cho phép quyền truy cập microphone.');
+            }
+        }
+
+        $('#resetChat').click(function() {
+            if (confirm('Bạn có chắc muốn xóa toàn bộ lịch sử chat không?')) {
                 $.ajax({
-                    url: '/stop_recording',
+                    url: '/reset_chat',
                     method: 'POST',
                     success: function(response) {
-                        console.log('Recording stopped:', response);
-                        
-                        if (response.transcribed_text) {
-                            $('#transcription').html('<strong>Bạn nói:</strong> ' + response.transcribed_text);
-                            $('#response').html('<strong>Trả lời:</strong> ' + response.response_text);
-                            
-                            const audio = $('#responseAudio');
-                            const audioStatus = $('#audioStatus');
-                            
-                            // Clear previous audio
-                            audio.get(0).pause();
-                            audio.get(0).currentTime = 0;
-                            
-                            // Set new source with timestamp to prevent caching
-                            const timestamp = new Date().getTime();
-                            audio.attr('src', `/audio/response.mp3?t=${timestamp}`);
-                            
-                            // Add event listeners for audio
-                            audio.on('loadeddata', function() {
-                                console.log('Audio loaded successfully');
-                                audioStatus.text('Trả lời đang phát...');
-                                
-                                // Try to play and handle any autoplay restrictions
-                                const playPromise = audio.get(0).play();
-                                
-                                if (playPromise !== undefined) {
-                                    playPromise.then(_ => {
-                                        console.log('Autoplay started');
-                                    }).catch(error => {
-                                        console.error('Autoplay prevented:', error);
-                                        audioStatus.text('Nhấn vào nút play để nghe trả lời');
-                                        audio.show(); // Make sure audio controls are visible
-                                    });
-                                }
-                            });
-                            
-                            audio.on('ended', function() {
-                                audioStatus.text('Trả lời đã kết thúc');
-                            });
-                            
-                            audio.on('error', function(e) {
-                                console.error('Audio loading error:', e);
-                                audioStatus.text('Lỗi phát âm thanh. Vui lòng thử lại.');
-                            });
-                            
-                            audio.show();
-                            $('#status').show();
-                        }
-                        $button.prop('disabled', false);  // Re-enable button
+                        $('#chat-history').empty();
+                        console.log('Chat history reset');
                     },
                     error: function(error) {
-                        console.error('Error:', error);
-                        $button.prop('disabled', false);  // Re-enable button
+                        console.error('Error resetting chat:', error);
+                        alert('Lỗi khi xóa lịch sử chat');
                     }
                 });
             }
         });
+
+        $('#recordButton').click(async function() {
+            if (isProcessing) return;
+            
+            if (!mediaRecorder) {
+                await setupRecording();
+            }
+
+            isRecording = !isRecording;
+            const $button = $(this);
+            
+            if (isRecording) {
+                audioChunks = [];
+                mediaRecorder.start();
+                $button.text('Dừng ghi âm');
+                $button.addClass('recording');
+            } else {
+                mediaRecorder.stop();
+                $button.text('Đang xử lý');
+                $button.removeClass('recording');
+            }
+        });
+
+        // Initialize recording setup when page loads
+        setupRecording();
     </script>
 </body>
 </html> 

@@ -2,17 +2,15 @@ from elevenlabs import stream
 from elevenlabs.client import ElevenLabs
 from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq
 from dotenv import load_dotenv
-import sounddevice as sd
 import numpy as np
 import soundfile as sf
 from openai import OpenAI
 import os
 from scipy.io import wavfile
 from PyPDF2 import PdfReader
-from threading import Event, Lock
-import queue
-import time
 import logging
+from pydub import AudioSegment
+import tempfile
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -28,10 +26,6 @@ class AudioProcessor:
     def __init__(self):
         logger.info("Initializing AudioProcessor...")
         self.chat_history = []
-        self.audio_queue = queue.Queue()
-        self.is_recording = False
-        self.stream = None
-        self.stream_lock = Lock()
         
         # Initialize models
         logger.info("Loading Whisper models...")
@@ -48,6 +42,24 @@ class AudioProcessor:
         self._initialize_chat()
         logger.info("AudioProcessor initialization complete")
 
+    def convert_audio_to_wav(self, input_path, output_path):
+        """Convert audio file to WAV format with specific parameters for Whisper"""
+        try:
+            logger.info(f"Converting audio file from {input_path} to {output_path}")
+            audio = AudioSegment.from_file(input_path)
+            
+            # Convert to mono and set sample rate to 16kHz
+            audio = audio.set_channels(1)
+            audio = audio.set_frame_rate(16000)
+            
+            # Export as WAV
+            audio.export(output_path, format="wav")
+            logger.info("Audio conversion successful")
+            return True
+        except Exception as e:
+            logger.error(f"Error converting audio: {str(e)}")
+            return False
+
     def _read_pdf_content(self, pdf_path):
         logger.info(f"Reading PDF content from: {pdf_path}")
         reader = PdfReader(pdf_path)
@@ -62,7 +74,7 @@ class AudioProcessor:
         pdf_path = "/Users/masterh/Desktop/WORK /Coding/viet-ttsts-local/viet-ttsts/TT KHACH THUE_ 174TH.pdf"
         pdf_content = self._read_pdf_content(pdf_path)
         self.chat_history = [
-            {"role": "system", "content": f"Bạn là một người giúp đỡ rất chu đáo, hãy trả lời các câu hỏi bằng tiếng Việt một cách ngắn gọn nhưng đầy đủ thông tin. Đây là nội dung cần nhớ: {pdf_content}"},
+            {"role": "system", "content": f"Bạn là một người giúp đỡ trên tổng đài rất chu đáo, Nên nhớ người gọi muốn có thông tin xúc tích nên hãy trả lời các câu hỏi bằng tiếng Việt một cách ngắn gọn nhưng đầy đủ thông tin. Nếu người gọi hỏi về các câu hỏi không liên quan đến nội dung cần nhớ thì hãy trả lời rằng bạn không biết. Đây là nội dung cần nhớ: {pdf_content}"},
         ]
 
     def process_with_openai(self, text):
@@ -82,93 +94,28 @@ class AudioProcessor:
         
         return assistant_response
 
-    def audio_callback(self, indata, frames, time, status):
-        if status:
-            logger.warning(f"Audio callback status: {status}")
-        if self.is_recording:
-            try:
-                self.audio_queue.put(indata.copy())
-                logger.debug(f"Added {len(indata)} samples to queue. Queue size: {self.audio_queue.qsize()}")
-            except Exception as e:
-                logger.error(f"Error in audio callback: {e}")
-
-    def start_recording(self):
-        with self.stream_lock:
-            if self.is_recording:
-                logger.warning("Already recording!")
-                return
-            
-            logger.info("Starting audio recording...")
-            self.is_recording = True
-            self.audio_queue = queue.Queue()
-            
-            try:
-                self.stream = sd.InputStream(
-                    samplerate=16000,
-                    channels=1,
-                    callback=self.audio_callback,
-                    blocksize=1024
-                )
-                self.stream.start()
-                logger.info("Recording stream started successfully")
-            except Exception as e:
-                self.is_recording = False
-                logger.error(f"Failed to start recording: {e}")
-                raise
-
-    def stop_recording(self):
-        with self.stream_lock:
-            if not self.is_recording:
-                logger.warning("Not currently recording!")
-                return "Not recording"
-            
-            logger.info("Stopping recording...")
-            self.is_recording = False
-            
-            if self.stream:
-                try:
-                    self.stream.stop()
-                    self.stream.close()
-                    self.stream = None
-                except Exception as e:
-                    logger.error(f"Error closing stream: {e}")
-            
-            return self.process_recording()
-
-    def process_recording(self):
-        logger.info("Processing recording...")
-        if self.audio_queue.empty():
-            logger.warning("No audio recorded!")
-            return "No audio recorded"
-
-        # Combine all audio chunks
-        audio_data = []
-        queue_size = self.audio_queue.qsize()
-        logger.info(f"Processing {queue_size} audio chunks")
+    def process_audio_file(self, audio_file):
+        """Process uploaded audio file and return response"""
+        logger.info("Processing uploaded audio file")
+        temp_input = None
+        temp_wav = None
         
-        while not self.audio_queue.empty():
-            chunk = self.audio_queue.get()
-            audio_data.append(chunk)
-
-        if not audio_data:
-            logger.warning("No audio data collected")
-            return "No audio data"
-
-        # Combine chunks and convert to numpy array
-        audio_array = np.concatenate(audio_data)
-        audio_array = (audio_array * 32767).astype(np.int16)
-        
-        logger.info(f"Final audio array shape: {audio_array.shape}")
-
-        # Save temporary WAV file
-        temp_file_path = "temp_recording.wav"
-        wavfile.write(temp_file_path, 16000, audio_array)
-        logger.info(f"Saved temporary recording to {temp_file_path}")
-
         try:
+            # Create temporary files
+            temp_input = tempfile.NamedTemporaryFile(delete=False, suffix='.webm')
+            temp_wav = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
+            
+            # Save uploaded file
+            audio_file.save(temp_input.name)
+            logger.info(f"Saved uploaded file to {temp_input.name}")
+            
+            # Convert to WAV
+            if not self.convert_audio_to_wav(temp_input.name, temp_wav.name):
+                raise Exception("Failed to convert audio file")
+            
             # Process audio with Whisper
             logger.info("Processing audio with Whisper...")
-            audio_input, sampling_rate = sf.read(temp_file_path)
+            audio_input, sampling_rate = sf.read(temp_wav.name)
             input_features = self.processor(
                 audio_input,
                 sampling_rate=sampling_rate,
@@ -186,7 +133,7 @@ class AudioProcessor:
             vietnamese_response = self.process_with_openai(transcribed_text)
             logger.info(f"Vietnamese response: {vietnamese_response}")
 
-            # Generate speech with ElevenLabs using new streaming API
+            # Generate speech with ElevenLabs
             logger.info("Generating speech with ElevenLabs...")
             audio_stream = elevenlabs_client.text_to_speech.convert_as_stream(
                 text=vietnamese_response,
@@ -194,7 +141,7 @@ class AudioProcessor:
                 model_id="eleven_flash_v2_5"
             )
 
-            # Collect audio chunks and save to file
+            # Save response audio
             response_path = "static/response.mp3"
             os.makedirs("static", exist_ok=True)
             
@@ -213,20 +160,20 @@ class AudioProcessor:
 
         except Exception as e:
             logger.error(f"Error during processing: {str(e)}", exc_info=True)
-            return str(e)
+            return {"error": str(e)}
         finally:
-            if os.path.exists(temp_file_path):
-                os.remove(temp_file_path)
-                logger.info("Cleaned up temporary recording file")
+            # Clean up temporary files
+            for temp_file in [temp_input, temp_wav]:
+                if temp_file and os.path.exists(temp_file.name):
+                    try:
+                        os.unlink(temp_file.name)
+                        logger.info(f"Cleaned up temporary file: {temp_file.name}")
+                    except Exception as e:
+                        logger.error(f"Error cleaning up temporary file: {str(e)}")
 
-    def cleanup(self):
-        logger.info("Cleaning up AudioProcessor...")
-        self.is_recording = False
-        with self.stream_lock:
-            if self.stream:
-                try:
-                    self.stream.stop()
-                    self.stream.close()
-                    self.stream = None
-                except Exception as e:
-                    logger.error(f"Error during cleanup: {e}") 
+    def reset_chat(self):
+        """Reset the chat history and clean up any resources"""
+        logger.info("Resetting chat history")
+        self.chat_history = []
+        # Re-initialize with system prompt
+        self._initialize_chat() 
